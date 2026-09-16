@@ -474,6 +474,7 @@
                             vec4 worldPosition = modelMatrix * vec4(position, 1.0);
                             vWorldPosition = worldPosition.xyz;
                             gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                            gl_Position.z = gl_Position.w; // Push sky dome to far plane preventing clipping depth issues
                         }
                     `,
                     fragmentShader: `
@@ -530,7 +531,8 @@
                             gl_FragColor = vec4(sky, 1.0);
                         }
                     `,
-                    side: THREE.BackSide
+                    side: THREE.BackSide,
+                    depthWrite: false
                 });
                 const mesh = new THREE.Mesh(skyGeo, this.material);
                 scene.add(mesh);
@@ -1314,6 +1316,9 @@
                 this.cameraYaw = 0;
                 this.cameraPitch = 0.25;
                 this.cameraDistance = 14;
+                
+                this.targetCameraYaw = 0;
+                this.targetCameraPitch = 0.25;
 
                 this.worldRadiusLimit = 600.0;
                 this.warningElement = document.getElementById('boundary-warning');
@@ -1353,16 +1358,16 @@
 
                 document.addEventListener('mousemove', (e) => {
                     if (!this.isMobile && document.pointerLockElement === document.body) {
-                        this.cameraYaw -= e.movementX * 0.0025;
-                        this.cameraPitch += e.movementY * 0.0025;
-                        this.cameraPitch = Math.max(-Math.PI / 2 + 0.08, Math.min(Math.PI / 2 - 0.08, this.cameraPitch));
+                        this.targetCameraYaw -= e.movementX * 0.0025;
+                        this.targetCameraPitch += e.movementY * 0.0025;
+                        this.targetCameraPitch = Math.max(-Math.PI / 2 + 0.08, Math.min(Math.PI / 2 - 0.08, this.targetCameraPitch));
                     }
                 });
 
                 // Mobile Setup & Virtual Joystick Handling
                 if (this.isMobile) {
                     document.getElementById('mobile-controls').style.display = 'block';
-                    document.getElementById('desktop-hints').innerHTML = '<kbd>Virtual Joystick</kbd> Move &nbsp;|&nbsp; <kbd>Screen Drag</kbd> Look &nbsp;|&nbsp; <kbd>Buttons</kbd> Jump/Run/Howl';
+                    document.getElementById('desktop-hints').style.display = 'none';
 
                     const zone = document.getElementById('joystick-zone');
                     const knob = document.getElementById('joystick-knob');
@@ -1414,34 +1419,51 @@
                     zone.addEventListener('touchend', endJoystick);
                     zone.addEventListener('touchcancel', endJoystick);
 
-                    // Camera Drag anywhere on screen for mobile look
+                    // Camera Drag anywhere on screen for smooth mobile look
+                    let cameraTouchId = null;
                     let lastClientX = 0;
                     let lastClientY = 0;
-                    let isDraggingScreen = false;
 
                     document.addEventListener('touchstart', (e) => {
-                        if (e.target.closest('#joystick-zone') || e.target.closest('.mobile-action-buttons')) return;
-                        isDraggingScreen = true;
-                        lastClientX = e.touches[0].clientX;
-                        lastClientY = e.touches[0].clientY;
+                        for (let i = 0; i < e.changedTouches.length; i++) {
+                            const touch = e.changedTouches[i];
+                            const isControls = touch.target.closest('#joystick-zone') || touch.target.closest('.mobile-action-buttons');
+                            if (!isControls && cameraTouchId === null) {
+                                cameraTouchId = touch.identifier;
+                                lastClientX = touch.clientX;
+                                lastClientY = touch.clientY;
+                            }
+                        }
                     }, { passive: true });
 
                     document.addEventListener('touchmove', (e) => {
-                        if (!isDraggingScreen) return;
-                        let clientX = e.touches[0].clientX;
-                        let clientY = e.touches[0].clientY;
-                        let deltaX = clientX - lastClientX;
-                        let deltaY = clientY - lastClientY;
+                        if (cameraTouchId === null) return;
+                        for (let i = 0; i < e.changedTouches.length; i++) {
+                            const touch = e.changedTouches[i];
+                            if (touch.identifier === cameraTouchId) {
+                                let deltaX = touch.clientX - lastClientX;
+                                let deltaY = touch.clientY - lastClientY;
 
-                        this.cameraYaw -= deltaX * 0.004;
-                        this.cameraPitch += deltaY * 0.004;
-                        this.cameraPitch = Math.max(-Math.PI / 2 + 0.08, Math.min(Math.PI / 2 - 0.08, this.cameraPitch));
+                                this.targetCameraYaw -= deltaX * 0.005;
+                                this.targetCameraPitch += deltaY * 0.005;
+                                this.targetCameraPitch = Math.max(-Math.PI / 2 + 0.08, Math.min(Math.PI / 2 - 0.08, this.targetCameraPitch));
 
-                        lastClientX = clientX;
-                        lastClientY = clientY;
+                                lastClientX = touch.clientX;
+                                lastClientY = touch.clientY;
+                            }
+                        }
                     }, { passive: true });
 
-                    document.addEventListener('touchend', () => { isDraggingScreen = false; });
+                    const endCameraTouch = (e) => {
+                        for (let i = 0; i < e.changedTouches.length; i++) {
+                            if (e.changedTouches[i].identifier === cameraTouchId) {
+                                cameraTouchId = null;
+                            }
+                        }
+                    };
+
+                    document.addEventListener('touchend', endCameraTouch);
+                    document.addEventListener('touchcancel', endCameraTouch);
 
                     // Mobile Action Buttons bindings
                     document.getElementById('m-jump-btn').addEventListener('touchstart', (e) => {
@@ -1534,6 +1556,10 @@
             update(delta) {
                 if (!this.character) return;
 
+                // Smooth camera rotation interpolation
+                this.cameraYaw = THREE.MathUtils.lerp(this.cameraYaw, this.targetCameraYaw, delta * 12.0);
+                this.cameraPitch = THREE.MathUtils.lerp(this.cameraPitch, this.targetCameraPitch, delta * 12.0);
+
                 let inputX = 0;
                 let inputZ = 0;
 
@@ -1555,7 +1581,7 @@
                 cameraForward.y = 0;
                 cameraForward.normalize();
 
-                const cameraRight = new THREE.Vector3().crossVectors(cameraForward, new THREE.Vector3(0, 1, 0)).negate();
+                const cameraRight = new THREE.Vector3().crossVectors(cameraForward, new THREE.Vector3(0, 1, 0)).normalize();
 
                 const moveDirection = new THREE.Vector3()
                     .addScaledVector(cameraForward, -inputZ)
